@@ -18,7 +18,8 @@
 # prefix (DW) to indicate the comment corresponds to a modification.
 # Author: Dylan Wheeler, 2024. GitHub: @dw-610
 #
-# Summary of modifications: 
+# Summary of modifications: added a custom conditional independence test using
+# the statsmodels api to fit a logistic regression model.
 
 from warnings import warn
 import math

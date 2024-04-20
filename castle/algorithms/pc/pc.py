@@ -20,7 +20,8 @@
 #
 # Summary of modifications: altered the PC algorithm to support the scenario
 # where there are two types of variables in the dataset, requiring different
-# conditional independence tests.
+# conditional independence tests. The modified version also assumes that the 
+# "outcome" variables have no outgoing edges.
 
 from copy import deepcopy
 from itertools import combinations, permutations
@@ -83,10 +84,11 @@ class PC(BaseLearner):
     >>> print(met.metrics)
     """
 
-    def __init__(self, variant='original', alpha=0.05, ci_test='fisherz',
-                 priori_knowledge=None):
+    def __init__(self, variant='original', modified=False, alpha=0.05, 
+                 ci_test='fisherz', priori_knowledge=None):
         super(PC, self).__init__()
         self.variant = variant
+        self.modified = modified
         self.alpha = alpha
         self.ci_test = ci_test
         self.causal_matrix = None
@@ -94,7 +96,8 @@ class PC(BaseLearner):
 
     # (DW) added 'treatments' and 'outcomes' parameters to differentiate
     # between the two types of variables in the modified PC algorithm
-    def learn(self, data, treatments, outcomes, columns=None, **kwargs):
+    def learn(self, data, treatments=None, outcomes=None, 
+              columns=None, **kwargs):
         """Set up and run the PC algorithm.
 
         Parameters
@@ -102,9 +105,11 @@ class PC(BaseLearner):
         data: array or Tensor
             Training data
         treatments: list
-            List of indices of the treatment variables.
+            List of indices of the treatment variables. Required for the
+            modified PC algorithm.
         outcomes: list
-            List of indices of the outcome variables.
+            List of indices of the outcome variables. Required for the
+            modified PC algorithm.
         columns : Index or array-like
             Column labels to use for resulting tensor. Will default to
             RangeIndex (0, 1, 2, ..., n) if no column labels are provided.
@@ -121,7 +126,16 @@ class PC(BaseLearner):
 
         data = Tensor(data, columns=columns)
 
+        # (DW) check for treatments and outcomes if using modified PC
+        if self.modified and (treatments is None or outcomes is None):
+            raise ValueError("Treatments and outcomes must be specified when "
+                             "using the modified PC algorithm.")
+
+        # (DW) pass 'modified', 'treatments' and 'outcomes' to find_skeleton
         skeleton, sep_set = find_skeleton(data,
+                                          modified=self.modified,
+                                          treatments=treatments,
+                                          outcomes=outcomes,
                                           alpha=self.alpha,
                                           ci_test=self.ci_test,
                                           variant=self.variant,
@@ -266,10 +280,11 @@ def orient(skeleton, sep_set, priori_knowledge=None):
 
     return cpdag
 
-
-def find_skeleton(data, alpha, ci_test, variant='original',
-                  priori_knowledge=None, base_skeleton=None,
-                  p_cores=1, s=None, batch=None):
+# (DW) added 'treatments' and 'outcomes' parameters to differentiate between
+# the two types of variables in the modified PC algorithm
+def find_skeleton(data, modified, treatments, outcomes, alpha, ci_test,
+                  variant='original', priori_knowledge=None, 
+                  base_skeleton=None, p_cores=1, s=None, batch=None):
     """Find skeleton graph from G using PC algorithm
 
     It learns a skeleton graph which contains only undirected edges
@@ -374,6 +389,9 @@ def find_skeleton(data, alpha, ci_test, variant='original',
     else:
         raise ValueError(f'The type of param `ci_test` expect callable,'
                          f'but got {type(ci_test)}.')
+    
+    # (DW) create reference to custom CITest method if using modified PC
+    ci_logit_test = CITest.logit_test if modified else None
 
     n_feature = data.shape[1]
     if base_skeleton is None:
@@ -405,36 +423,60 @@ def find_skeleton(data, alpha, ci_test, variant='original',
                     continue
                 adj_i = set(np.argwhere(C[i] == 1).reshape(-1, ))
                 z = adj_i - {j}  # adj(C, i)\{j}
+                # (DW) if modfied, remove outcome variables from z
+                for outcome in outcomes:
+                    if outcome in z:
+                        z = z - {outcome}
                 if len(z) >= d:
                     # |adj(C, i)\{j}| >= l
                     for sub_z in combinations(z, d):
                         sub_z = list(sub_z)
-                        _, _, p_value = ci_test(data, i, j, sub_z)
+                        # (DW) use custom CITest where required if modified
+                        # (DW) treatment-treatment pairs use normal CITest
+                        # (DW) treatment-outcome pairs use logit test
+                        # (DW) outcome-outcome pairs are not tested
+                        if not modified:
+                            _, _, p_value = ci_test(data, i, j, sub_z)
+                        else:
+                            if i in treatments and j in outcomes:
+                                _, _, p_value = ci_logit_test(data, i, j, sub_z)
+                            elif i in treatments and j in treatments:
+                                _, _, p_value = ci_test(data, i, j, sub_z)
+                            else:
+                                raise ValueError(
+                                    "Invalid variable combo for CITest."
+                                )
                         if p_value >= alpha:
                             skeleton[i, j] = skeleton[j, i] = 0
                             sep_set[(i, j)] = sub_z
                             break
         else:
-            J = [(x, y) for x, y in combinations(nodes, 2)
-                 if skeleton[x, y] == 1]
-            if not s or not batch:
-                batch = len(J)
-            if batch < 1:
-                batch = 1
-            if not p_cores or p_cores == 0:
-                raise ValueError(f'If variant is parallel, type of p_cores '
-                                 f'must be int, but got {type(p_cores)}.')
-            for i in range(int(np.ceil(len(J) / batch))):
-                each_batch = J[batch * i: batch * (i + 1)]
-                parallel_result = joblib.Parallel(n_jobs=p_cores,
-                                                  max_nbytes=None)(
-                    joblib.delayed(parallel_cell)(x, y) for x, y in
-                    each_batch
+            # (DW) remove option to use parallel PC with modified PC
+            if modified:
+                raise NotImplementedError(
+                    "Parallel PC not supported for the modified PC algorithm."
                 )
-                # Synchronisation Step
-                for (x, y), K_x_y, sub_z in parallel_result:
-                    if K_x_y == 0:
-                        skeleton[x, y] = skeleton[y, x] = 0
-                        sep_set[(x, y)] = sub_z
+            else:
+                J = [(x, y) for x, y in combinations(nodes, 2)
+                    if skeleton[x, y] == 1]
+                if not s or not batch:
+                    batch = len(J)
+                if batch < 1:
+                    batch = 1
+                if not p_cores or p_cores == 0:
+                    raise ValueError(f'If variant is parallel, type of p_cores '
+                                    f'must be int, but got {type(p_cores)}.')
+                for i in range(int(np.ceil(len(J) / batch))):
+                    each_batch = J[batch * i: batch * (i + 1)]
+                    parallel_result = joblib.Parallel(n_jobs=p_cores,
+                                                    max_nbytes=None)(
+                        joblib.delayed(parallel_cell)(x, y) for x, y in
+                        each_batch
+                    )
+                    # Synchronisation Step
+                    for (x, y), K_x_y, sub_z in parallel_result:
+                        if K_x_y == 0:
+                            skeleton[x, y] = skeleton[y, x] = 0
+                            sep_set[(x, y)] = sub_z
 
     return skeleton, sep_set
