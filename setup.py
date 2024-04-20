@@ -40,5 +40,6 @@ setuptools.setup(
         "scikit-learn>=0.21.1",
         "matplotlib>=2.1.2",
         "networkx>=2.5",
+        "statsmodels>=0.14.1"
     ],
 )
