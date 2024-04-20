@@ -12,6 +12,14 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+#
+# This version has been modified to support some custom functionality.
+# Modified code is preceded by a comment explaining the modification, with the 
+# prefix (DW) to indicate the comment corresponds to a modification.
+# Author: Dylan Wheeler, 2024. GitHub: @dw-610
+#
+# Summary of modifications: added a custom conditional independence test using
+# the statsmodels api to fit a logistic regression model.
 
 from warnings import warn
 import math
@@ -19,6 +27,8 @@ import numpy as np
 import pandas as pd
 from scipy import stats
 
+# (DW) Import statsmodels for fitting logistic regression models
+import statsmodels.api as sm
 
 class CITest(object):
     """
@@ -412,6 +422,57 @@ class CITest(object):
         """
 
         return power_divergence(data, x, y, z, lambda_='cressie-read')
+    
+    # (DW) Custom conditional independence test using logistic regression, for 
+    # the case where the target variable is binary and the other variables are
+    # continuous. The p-value returned by the statsmodels object is used as the
+    # test statistic.
+    @staticmethod
+    def logit_test(data, x, y, z):
+        """
+        Logistic regression test for conditional independence.
+
+        Parameters
+        ----------
+        data : ndarray
+            The dataset on which to test the independence condition.
+        x : int
+            A variable in data set
+        y : int
+            A variable in data set
+        z : List, default []
+            A list of variable names contained in the data set different
+            from x and y. This is the separating set that (potentially)
+            makes x and y independent.
+
+        Returns
+        -------
+        _: None
+        _: None
+        p: float
+            the p-value of conditional independence.
+        """
+        k = len(z)
+
+        if k == 0:
+            data_X = sm.add_constant(data[:, x])
+            data_y = data[:, y]
+            model = sm.Logit(data_y, data_X)
+        else:
+            sub_index = [x]
+            sub_index.extend(z)
+            data_X = sm.add_constant(data[:, sub_index])
+            data_y = data[:, y]
+
+        model = sm.Logit(data_y, data_X)
+        try:
+            result = model.fit(disp=0)
+        except np.linalg.LinAlgError:
+            print('problem with logistic regression')
+            breakpoint()
+        p_value = result.pvalues[1]
+
+        return None, None, p_value
 
 
 def power_divergence(data, x, y, z, lambda_=None):
